@@ -69,6 +69,90 @@ func sshConfig() *ssh.ServerConfig {
 	return config
 }
 
+func parseGitCommand(payload []byte) (string, string, error) {
+	index := bytes.IndexByte(payload, byte('g'))
+	if index == -1 {
+		log.Fatalf("req.Payload, %v", payload)
+	}
+	payloadStr := string(payload[index:])
+	args := strings.Split(payloadStr, " ")
+	if len(args) != 2 {
+		log.Fatal(args)
+	}
+	command := strings.TrimSpace(args[0])
+	repository := strings.Trim(strings.Trim(args[1], "'"), "/")
+
+	return command, repository, nil
+}
+
+func handleConnection(nConn net.Conn, config *ssh.ServerConfig) {
+	conn, chans, reqs, err := ssh.NewServerConn(nConn, config)
+	if err != nil {
+		log.Fatal("failed to handshake: ", err)
+	}
+	log.Printf("logged with key %s", conn.Permissions.Extensions["pubkey-fp"])
+
+	go ssh.DiscardRequests(reqs)
+
+	for newChannel := range chans {
+		log.Printf("channel type: %s", newChannel.ChannelType())
+		if newChannel.ChannelType() != "session" {
+			newChannel.Reject(ssh.UnknownChannelType, "unknown channel type")
+			continue
+		}
+
+		channel, requires, err := newChannel.Accept()
+		if err != nil {
+			log.Fatalf("Could not accept channel: %v", err)
+		}
+		log.Printf("accpet new channel")
+
+		go func(ch ssh.Channel, in <-chan *ssh.Request) {
+			defer channel.Close()
+			for req := range in {
+				log.Printf("req type: %s", req.Type)
+
+				if req.Type == "exec" {
+					command, repository, err := parseGitCommand(req.Payload)
+					if err != nil {
+						log.Fatal(err)
+					}
+					log.Printf("git command: %s %s", command, repository)
+
+					client, err := Get("127.0.0.1:8080")
+					if err != nil {
+						log.Fatal(err)
+					}
+
+					switch command {
+					case "git-upload-pack":
+						stream, err := client.SSHUploadPack(context.Background())
+						if err != nil {
+							log.Fatal(err)
+						}
+
+						request := &pb.SSHUploadPackRequest{
+							Repository: &pb.Repository{
+								Path:      repository,
+								Namespace: repository,
+							},
+						}
+
+						if err := stream.Send(request); err != nil {
+							log.Fatal(err)
+						}
+					case "git-receive-pack":
+					default:
+						log.Fatal(command)
+					}
+				}
+
+				req.Reply(req.Type == "exec", nil)
+			}
+		}(channel, requires)
+	}
+}
+
 func main() {
 	config := sshConfig()
 
@@ -82,76 +166,6 @@ func main() {
 		if err != nil {
 			log.Fatal("failed to accept incoming connection: ", err)
 		}
-
-		conn, chans, reqs, err := ssh.NewServerConn(nConn, config)
-		if err != nil {
-			log.Fatal("failed to handshake: ", err)
-		}
-		log.Printf("logged with key %s", conn.Permissions.Extensions["pubkey-fp"])
-
-		go ssh.DiscardRequests(reqs)
-
-		for newChannel := range chans {
-			log.Printf("channel type: %s", newChannel.ChannelType())
-			if newChannel.ChannelType() != "session" {
-				newChannel.Reject(ssh.UnknownChannelType, "unknown channel type")
-				continue
-			}
-
-			channel, requires, err := newChannel.Accept()
-			if err != nil {
-				log.Fatalf("Could not accept channel: %v", err)
-			}
-			log.Printf("accpet new channel")
-
-			go func(ch ssh.Channel, in <-chan *ssh.Request) {
-				defer channel.Close()
-				for req := range in {
-					log.Printf("req type: %s", req.Type)
-
-					if req.Type == "exec" {
-						index := bytes.IndexByte(req.Payload, byte('g'))
-						if index == -1 {
-							log.Fatalf("req.Payload, %v", req.Payload)
-						}
-						payload := string(req.Payload[index:])
-						args := strings.Split(payload, " ")
-						if len(args) != 2 {
-							log.Fatal(args)
-						}
-						command := strings.TrimSpace(args[0])
-						repository := strings.Trim(strings.Trim(args[1], "'"), "/")
-
-						log.Printf("%s %s", command, repository)
-
-						client := Get("127.0.0.1:8080")
-
-						switch command {
-						case "git-upload-pack":
-							stream, err := client.SSHUploadPack(context.Background())
-							if err != nil {
-								log.Fatal(err)
-							}
-
-							request := &pb.SSHUploadPackRequest{
-								Repository: &pb.Repository{
-									Path:      repository,
-									Namespace: repository,
-								},
-							}
-
-							if err := stream.Send(request); err != nil {
-								log.Fatal(err)
-							}
-						case "git-receive-pack":
-						default:
-							log.Fatal(command)
-						}
-					}
-
-					req.Reply(req.Type == "exec", nil)
-				}
-			}(channel, requires)
-		}
+		handleConnection(nConn, config)
 	}
 }
