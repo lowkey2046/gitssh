@@ -21,6 +21,7 @@ type sshServer struct {
 }
 
 func (s *sshServer) SSHUploadPack(stream pb.SSHService_SSHUploadPackServer) error {
+	log.Print("SSHUploadPack start")
 	in, err := stream.Recv()
 	if err != nil {
 		return err
@@ -29,6 +30,7 @@ func (s *sshServer) SSHUploadPack(stream pb.SSHService_SSHUploadPackServer) erro
 	repository := in.GetRepository()
 	cmd := exec.Command("git", "upload-pack", repository.GetNamespace())
 	cmd.Stdin = NewReader(func() ([]byte, error) {
+		log.Print("cmd.Stdin")
 		in, err := stream.Recv()
 		return in.GetStdin(), err
 	})
@@ -38,14 +40,22 @@ func (s *sshServer) SSHUploadPack(stream pb.SSHService_SSHUploadPackServer) erro
 		}
 		return stream.Send(out)
 	})
+	cmd.Stderr = NewRPCWriter(func(p []byte) error {
+		out := &pb.SSHUploadPackResponse{
+			Stderr: p,
+		}
+		return stream.Send(out)
+	})
 
 	if err := cmd.Start(); err != nil {
 		return err
 	}
 
 	if err := cmd.Wait(); err != nil {
+		log.Print("SSHUploadPack end")
 		return err
 	}
+	log.Print("SSHUploadPack end")
 
 	return nil
 }
@@ -68,12 +78,20 @@ func (s *sshServer) SSHReceivePack(stream pb.SSHService_SSHReceivePackServer) er
 		}
 		return stream.Send(out)
 	})
+	cmd.Stderr = NewRPCWriter(func(p []byte) error {
+		out := &pb.SSHReceivePackResponse{
+			Stderr: p,
+		}
+		log.Print(out)
+		return stream.Send(out)
+	})
 
 	if err := cmd.Start(); err != nil {
 		return err
 	}
 
 	if err := cmd.Wait(); err != nil {
+		log.Println(err)
 		return err
 	}
 

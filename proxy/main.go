@@ -2,7 +2,9 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"net"
 	"strings"
@@ -73,17 +75,175 @@ func sshConfig() *ssh.ServerConfig {
 func parseGitCommand(payload []byte) (string, string, error) {
 	index := bytes.IndexByte(payload, byte('g'))
 	if index == -1 {
-		log.Fatalf("req.Payload, %v", payload)
+		return "", "", errors.New("not git command")
 	}
+
 	payloadStr := string(payload[index:])
 	args := strings.Split(payloadStr, " ")
 	if len(args) != 2 {
-		log.Fatal(args)
+		return "", "", errors.New("git command args error")
 	}
+
 	command := strings.TrimSpace(args[0])
 	repository := strings.Trim(strings.Trim(args[1], "'"), "/")
 
 	return command, repository, nil
+}
+
+func handleChannel(channel ssh.Channel, in <-chan *ssh.Request) {
+	defer channel.Close()
+	for req := range in {
+		req.Reply(req.Type == "exec", nil)
+
+		if req.Type == "exec" {
+			command, repository, err := parseGitCommand(req.Payload)
+			if err != nil {
+				log.Fatal(err)
+			}
+			log.Printf("git command: %s %s", command, repository)
+
+			// TODO: 通过 repository 查询 ip 地址
+			client, err := Get("127.0.0.1:8080")
+			if err != nil {
+				log.Fatal(err)
+			}
+
+			switch command {
+			case "git-upload-pack":
+				stream, err := client.SSHUploadPack(context.Background())
+				if err != nil {
+					log.Fatal(err)
+				}
+
+				request := &pb.SSHUploadPackRequest{
+					Repository: &pb.Repository{
+						Path:      repository,
+						Namespace: repository,
+					},
+				}
+
+				if err := stream.Send(request); err != nil {
+					log.Fatal(err)
+				}
+
+				go func() {
+					// 将客户端的数据写到 rpc
+					for {
+						buf := make([]byte, 1024)
+						n, err := channel.Read(buf)
+						if err == io.EOF {
+							stream.CloseSend()
+							break
+						}
+						if err != nil {
+							log.Printf("channel.Read %v", err)
+							break
+						}
+
+						request := pb.SSHUploadPackRequest{
+							Stdin: buf[:n],
+						}
+						err = stream.Send(&request)
+						if err != nil {
+							log.Printf("stream.Send  %v", err)
+							break
+						}
+					}
+				}()
+
+				// 从 rpc 中读取读取数据，并转发给客户端
+				for {
+					response, err := stream.Recv()
+					if err == io.EOF {
+						channel.SendRequest("exit-status", false, []byte{0, 0, 0, 0})
+						channel.Close()
+						break
+					}
+
+					if err != nil {
+						log.Printf("stream.Recv: %v", err)
+						channel.Close()
+						break
+					}
+
+					// 标准输出
+					if len(response.GetStdout()) > 0 {
+						_, err = channel.Write(response.GetStdout())
+						if err != nil {
+							log.Printf("channel.Write: %v", err)
+							break
+						}
+					}
+
+					// 标准出错
+					if len(response.GetStderr()) > 0 {
+						stream.CloseSend()
+						_, err = channel.Stderr().Write(response.GetStderr())
+						if err != nil {
+							log.Printf("channel.Stderr.Write: %v", err)
+							break
+						}
+					}
+				}
+
+			case "git-receive-pack":
+				stream, err := client.SSHReceivePack(context.Background())
+				if err != nil {
+					log.Fatal(err)
+				}
+
+				request := &pb.SSHReceivePackRequest{
+					Repository: &pb.Repository{
+						Path:      repository,
+						Namespace: repository,
+					},
+				}
+
+				if err := stream.Send(request); err != nil {
+					log.Fatal(err)
+				}
+
+				// receive
+				go func() {
+					for {
+						response, err := stream.Recv()
+						if err != nil {
+							channel.SendRequest("exit-status", false, []byte{0, 0, 0, 0})
+							channel.Close()
+							log.Printf("stream.Recv: %v", err)
+							break
+						}
+						_, err = channel.Write(response.GetStdout())
+						if err != nil {
+							log.Printf("channel.Write: %v", err)
+							break
+						}
+					}
+				}()
+
+				// send
+				for {
+					buf := make([]byte, 1024)
+					n, err := channel.Read(buf)
+					if err != nil {
+						stream.CloseSend()
+						log.Printf("channel.Read %v", err)
+						break
+					}
+					request := pb.SSHReceivePackRequest{
+						Stdin: buf[:n],
+					}
+					err = stream.Send(&request)
+					if err != nil {
+						log.Printf("stream.Send  %v", err)
+						break
+					}
+				}
+			default:
+				log.Fatal(command)
+			}
+		}
+	}
 }
 
 func handleConnection(nConn net.Conn, config *ssh.ServerConfig) {
@@ -108,136 +268,7 @@ func handleConnection(nConn net.Conn, config *ssh.ServerConfig) {
 		}
 		log.Printf("accpet new channel")
 
-		go func(ch ssh.Channel, in <-chan *ssh.Request) {
-			defer channel.Close()
-			for req := range in {
-				req.Reply(req.Type == "exec", nil)
-
-				if req.Type == "exec" {
-					command, repository, err := parseGitCommand(req.Payload)
-					if err != nil {
-						log.Fatal(err)
-					}
-					log.Printf("git command: %s %s", command, repository)
-
-					client, err := Get("127.0.0.1:8080")
-					if err != nil {
-						log.Fatal(err)
-					}
-
-					switch command {
-					case "git-upload-pack":
-						stream, err := client.SSHUploadPack(context.Background())
-						if err != nil {
-							log.Fatal(err)
-						}
-
-						request := &pb.SSHUploadPackRequest{
-							Repository: &pb.Repository{
-								Path:      repository,
-								Namespace: repository,
-							},
-						}
-
-						if err := stream.Send(request); err != nil {
-							log.Fatal(err)
-						}
-
-						// receive
-						go func() {
-							for {
-								response, err := stream.Recv()
-								if err != nil {
-									channel.SendRequest("exit-status", false, []byte{0, 0, 0, 0})
-									channel.Close()
-									log.Printf("stream.Recv: %v", err)
-									break
-								}
-								_, err = channel.Write(response.GetStdout())
-								if err != nil {
-									log.Printf("channel.Write: %v", err)
-									break
-								}
-							}
-						}()
-
-						// send
-						for {
-							buf := make([]byte, 1024)
-							n, err := channel.Read(buf)
-							if err != nil {
-								stream.CloseSend()
-								log.Printf("channel.Read %v", err)
-								break
-							}
-							request := pb.SSHUploadPackRequest{
-								Stdin: buf[:n],
-							}
-							err = stream.Send(&request)
-							if err != nil {
-								log.Printf("stream.Send  %v", err)
-								break
-							}
-						}
-					case "git-receive-pack":
-						stream, err := client.SSHReceivePack(context.Background())
-						if err != nil {
-							log.Fatal(err)
-						}
-
-						request := &pb.SSHReceivePackRequest{
-							Repository: &pb.Repository{
-								Path:      repository,
-								Namespace: repository,
-							},
-						}
-
-						if err := stream.Send(request); err != nil {
-							log.Fatal(err)
-						}
-
-						// receive
-						go func() {
-							for {
-								response, err := stream.Recv()
-								if err != nil {
-									channel.SendRequest("exit-status", false, []byte{0, 0, 0, 0})
-									channel.Close()
-									log.Printf("stream.Recv: %v", err)
-									break
-								}
-								_, err = channel.Write(response.GetStdout())
-								if err != nil {
-									log.Printf("channel.Write: %v", err)
-									break
-								}
-							}
-						}()
-
-						// send
-						for {
-							buf := make([]byte, 1024)
-							n, err := channel.Read(buf)
-							if err != nil {
-								stream.CloseSend()
-								log.Printf("channel.Read %v", err)
-								break
-							}
-							request := pb.SSHReceivePackRequest{
-								Stdin: buf[:n],
-							}
-							err = stream.Send(&request)
-							if err != nil {
-								log.Printf("stream.Send  %v", err)
-								break
-							}
-						}
-					default:
-						log.Fatal(command)
-					}
-				}
-			}
-		}(channel, requires)
+		handleChannel(channel, requires)
 	}
 }
 
