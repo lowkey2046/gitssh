@@ -4,11 +4,11 @@ import (
 	"bytes"
 	"fmt"
 	"io/ioutil"
-	"log"
 	"net"
 	"strings"
 
 	pb "github.com/lowkey2046/gitssh/proto"
+	"github.com/sirupsen/logrus"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/net/context"
 )
@@ -16,6 +16,7 @@ import (
 var (
 	authorizedKeysPath = "ssh/authorized_keys"
 	hostKeyPath        = "ssh/id_rsa"
+	log                = logrus.New()
 )
 
 func sshConfig() *ssh.ServerConfig {
@@ -110,7 +111,7 @@ func handleConnection(nConn net.Conn, config *ssh.ServerConfig) {
 		go func(ch ssh.Channel, in <-chan *ssh.Request) {
 			defer channel.Close()
 			for req := range in {
-				log.Printf("req type: %s", req.Type)
+				req.Reply(req.Type == "exec", nil)
 
 				if req.Type == "exec" {
 					command, repository, err := parseGitCommand(req.Payload)
@@ -141,13 +142,48 @@ func handleConnection(nConn net.Conn, config *ssh.ServerConfig) {
 						if err := stream.Send(request); err != nil {
 							log.Fatal(err)
 						}
+
+						// receive
+						go func() {
+							for {
+								response, err := stream.Recv()
+								if err != nil {
+									channel.SendRequest("exit-status", false, []byte{0, 0, 0, 0})
+									channel.Close()
+									log.Printf("stream.Recv: %v", err)
+									break
+								}
+								_, err = channel.Write(response.GetStdout())
+								if err != nil {
+									log.Printf("channel.Write: %v", err)
+									break
+								}
+							}
+						}()
+
+						// send
+						for {
+							buf := make([]byte, 1024)
+							n, err := channel.Read(buf)
+							if err != nil {
+								stream.CloseSend()
+								log.Printf("channel.Read %v", err)
+								break
+							}
+							request := pb.SSHUploadPackRequest{
+								Stdin: buf[:n],
+							}
+							err = stream.Send(&request)
+							if err != nil {
+								log.Printf("stream.Send  %v", err)
+								break
+							}
+						}
 					case "git-receive-pack":
 					default:
 						log.Fatal(command)
 					}
 				}
-
-				req.Reply(req.Type == "exec", nil)
 			}
 		}(channel, requires)
 	}

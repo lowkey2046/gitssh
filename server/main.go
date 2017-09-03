@@ -2,7 +2,6 @@ package main
 
 import (
 	"net"
-	"os"
 	"os/exec"
 
 	"github.com/grpc-ecosystem/go-grpc-middleware"
@@ -29,8 +28,17 @@ func (s *sshServer) SSHUploadPack(stream pb.SSHService_SSHUploadPackServer) erro
 	// TODO: nil
 	repository := in.GetRepository()
 	cmd := exec.Command("git", "upload-pack", repository.GetNamespace())
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
+	cmd.Stdin = NewReader(func() ([]byte, error) {
+		in, err := stream.Recv()
+		return in.GetStdin(), err
+	})
+	cmd.Stdout = NewRPCWriter(func(p []byte) error {
+		out := &pb.SSHUploadPackResponse{
+			Stdout: p,
+		}
+		return stream.Send(out)
+	})
+
 	if err := cmd.Start(); err != nil {
 		return err
 	}
