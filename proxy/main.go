@@ -180,6 +180,58 @@ func handleConnection(nConn net.Conn, config *ssh.ServerConfig) {
 							}
 						}
 					case "git-receive-pack":
+						stream, err := client.SSHReceivePack(context.Background())
+						if err != nil {
+							log.Fatal(err)
+						}
+
+						request := &pb.SSHReceivePackRequest{
+							Repository: &pb.Repository{
+								Path:      repository,
+								Namespace: repository,
+							},
+						}
+
+						if err := stream.Send(request); err != nil {
+							log.Fatal(err)
+						}
+
+						// receive
+						go func() {
+							for {
+								response, err := stream.Recv()
+								if err != nil {
+									channel.SendRequest("exit-status", false, []byte{0, 0, 0, 0})
+									channel.Close()
+									log.Printf("stream.Recv: %v", err)
+									break
+								}
+								_, err = channel.Write(response.GetStdout())
+								if err != nil {
+									log.Printf("channel.Write: %v", err)
+									break
+								}
+							}
+						}()
+
+						// send
+						for {
+							buf := make([]byte, 1024)
+							n, err := channel.Read(buf)
+							if err != nil {
+								stream.CloseSend()
+								log.Printf("channel.Read %v", err)
+								break
+							}
+							request := pb.SSHReceivePackRequest{
+								Stdin: buf[:n],
+							}
+							err = stream.Send(&request)
+							if err != nil {
+								log.Printf("stream.Send  %v", err)
+								break
+							}
+						}
 					default:
 						log.Fatal(command)
 					}

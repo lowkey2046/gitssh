@@ -51,6 +51,32 @@ func (s *sshServer) SSHUploadPack(stream pb.SSHService_SSHUploadPackServer) erro
 }
 
 func (s *sshServer) SSHReceivePack(stream pb.SSHService_SSHReceivePackServer) error {
+	in, err := stream.Recv()
+	if err != nil {
+		return err
+	}
+	// TODO: nil
+	repository := in.GetRepository()
+	cmd := exec.Command("git", "receive-pack", repository.GetNamespace())
+	cmd.Stdin = NewReader(func() ([]byte, error) {
+		in, err := stream.Recv()
+		return in.GetStdin(), err
+	})
+	cmd.Stdout = NewRPCWriter(func(p []byte) error {
+		out := &pb.SSHReceivePackResponse{
+			Stdout: p,
+		}
+		return stream.Send(out)
+	})
+
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+
+	if err := cmd.Wait(); err != nil {
+		return err
+	}
+
 	return nil
 }
 
