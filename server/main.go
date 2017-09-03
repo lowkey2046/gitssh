@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"net"
 	"os/exec"
 
@@ -14,25 +15,31 @@ import (
 var (
 	addr    = ":8080"
 	log     = logrus.New()
-	workdir = "."
+	workDir = "."
 )
 
 type sshServer struct {
 }
 
 func (s *sshServer) SSHUploadPack(stream pb.SSHService_SSHUploadPackServer) error {
-	log.Print("SSHUploadPack start")
 	in, err := stream.Recv()
 	if err != nil {
 		return err
 	}
-	// TODO: nil
+
 	repository := in.GetRepository()
-	cmd := exec.Command("git", "upload-pack", repository.GetNamespace())
+	if repository == nil {
+		return errors.New("repository is empty")
+	}
+
+	cmd := exec.Command("git-upload-pack", repository.GetNamespace())
+	cmd.Dir = workDir
 	cmd.Stdin = NewReader(func() ([]byte, error) {
-		log.Print("cmd.Stdin")
 		in, err := stream.Recv()
-		return in.GetStdin(), err
+		if err != nil {
+			return nil, err
+		}
+		return in.GetStdin(), nil
 	})
 	cmd.Stdout = NewRPCWriter(func(p []byte) error {
 		out := &pb.SSHUploadPackResponse{
@@ -51,13 +58,7 @@ func (s *sshServer) SSHUploadPack(stream pb.SSHService_SSHUploadPackServer) erro
 		return err
 	}
 
-	if err := cmd.Wait(); err != nil {
-		log.Print("SSHUploadPack end")
-		return err
-	}
-	log.Print("SSHUploadPack end")
-
-	return nil
+	return cmd.Wait()
 }
 
 func (s *sshServer) SSHReceivePack(stream pb.SSHService_SSHReceivePackServer) error {
@@ -65,12 +66,20 @@ func (s *sshServer) SSHReceivePack(stream pb.SSHService_SSHReceivePackServer) er
 	if err != nil {
 		return err
 	}
-	// TODO: nil
+
 	repository := in.GetRepository()
-	cmd := exec.Command("git", "receive-pack", repository.GetNamespace())
+	if repository == nil {
+		return errors.New("repository is empty")
+	}
+
+	cmd := exec.Command("git-receive-pack", repository.GetNamespace())
+	cmd.Dir = workDir
 	cmd.Stdin = NewReader(func() ([]byte, error) {
 		in, err := stream.Recv()
-		return in.GetStdin(), err
+		if err != nil {
+			return nil, err
+		}
+		return in.GetStdin(), nil
 	})
 	cmd.Stdout = NewRPCWriter(func(p []byte) error {
 		out := &pb.SSHReceivePackResponse{
@@ -82,7 +91,6 @@ func (s *sshServer) SSHReceivePack(stream pb.SSHService_SSHReceivePackServer) er
 		out := &pb.SSHReceivePackResponse{
 			Stderr: p,
 		}
-		log.Print(out)
 		return stream.Send(out)
 	})
 
@@ -90,12 +98,7 @@ func (s *sshServer) SSHReceivePack(stream pb.SSHService_SSHReceivePackServer) er
 		return err
 	}
 
-	if err := cmd.Wait(); err != nil {
-		log.Println(err)
-		return err
-	}
-
-	return nil
+	return cmd.Wait()
 }
 
 func main() {
