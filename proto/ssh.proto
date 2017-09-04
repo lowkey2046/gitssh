@@ -8,8 +8,8 @@ service SSHService {
 }
 
 message Repository {
-  string path = 1;
-  string namespace = 2;
+  string storage = 1;
+  string relative_path = 2;
 }
 
 message SSHUploadPackRequest {

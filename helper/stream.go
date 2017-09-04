@@ -1,4 +1,4 @@
-package main
+package helper
 
 type RPCReader struct {
 	recv func() ([]byte, error)
@@ -6,7 +6,7 @@ type RPCReader struct {
 	err  error
 }
 
-func NewReader(reader func() ([]byte, error)) *RPCReader {
+func NewRPCReader(reader func() ([]byte, error)) *RPCReader {
 	return &RPCReader{
 		recv: reader,
 	}

@@ -9,6 +9,7 @@ import (
 	"net"
 	"strings"
 
+	"github.com/lowkey2046/gitssh/helper"
 	pb "github.com/lowkey2046/gitssh/proto"
 	"github.com/sirupsen/logrus"
 	"golang.org/x/crypto/ssh"
@@ -39,12 +40,6 @@ func sshConfig() *ssh.ServerConfig {
 	}
 
 	config := &ssh.ServerConfig{
-		PasswordCallback: func(conn ssh.ConnMetadata, password []byte) (*ssh.Permissions, error) {
-			if conn.User() == "git" && string(password) == "123456" {
-				return nil, nil
-			}
-			return nil, fmt.Errorf("password rejected for %q", conn.User())
-		},
 		PublicKeyCallback: func(conn ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
 			if authorizedKeysMap[string(key.Marshal())] {
 				return &ssh.Permissions{
@@ -90,16 +85,18 @@ func parseGitCommand(payload []byte) (string, string, error) {
 	return command, repository, nil
 }
 
-func handleChannel(channel ssh.Channel, in <-chan *ssh.Request) {
+func handleChannel(channel ssh.Channel, requires <-chan *ssh.Request) {
 	defer channel.Close()
-	for req := range in {
+	for req := range requires {
 		req.Reply(req.Type == "exec", nil)
 
 		if req.Type == "exec" {
 			command, repository, err := parseGitCommand(req.Payload)
 			if err != nil {
-				log.Fatal(err)
+				log.Printf("parseGitCommand: %v", err)
+				continue
 			}
+
 			log.Printf("git command: %s %s", command, repository)
 
 			// TODO: 通过 repository 查询 ip 地址
@@ -115,61 +112,44 @@ func handleChannel(channel ssh.Channel, in <-chan *ssh.Request) {
 					log.Fatal(err)
 				}
 
-				request := &pb.SSHUploadPackRequest{
+				msg := &pb.SSHUploadPackRequest{
 					Repository: &pb.Repository{
-						Path:      repository,
-						Namespace: repository,
+						RelativePath: repository,
 					},
 				}
-
-				if err := stream.Send(request); err != nil {
+				if err := stream.Send(msg); err != nil {
 					log.Fatal(err)
 				}
 
+				// 客户端 -> RPC
 				go func() {
-					// 将客户端的数据写到 rpc
-					for {
-						buf := make([]byte, 1024)
-						n, err := channel.Read(buf)
-						if err == io.EOF {
-							stream.CloseSend()
-							break
-						}
-						if err != nil {
-							log.Printf("channel.Read %v", err)
-							break
-						}
+					sw := helper.NewRPCWriter(func(p []byte) error {
+						return stream.Send(&pb.SSHUploadPackRequest{Stdin: p})
+					})
 
-						request := pb.SSHUploadPackRequest{
-							Stdin: buf[:n],
-						}
-						err = stream.Send(&request)
-						if err != nil {
-							log.Printf("stream.Send  %v", err)
-							break
-						}
+					_, err := io.Copy(sw, channel)
+					if err != nil && err != io.EOF {
+						log.Printf("io.Copy: %s", err)
 					}
+					stream.CloseSend()
 				}()
 
-				// 从 rpc 中读取读取数据，并转发给客户端
+				// RPC -> 客户端
 				for {
 					response, err := stream.Recv()
-					if err == io.EOF {
-						channel.SendRequest("exit-status", false, []byte{0, 0, 0, 0})
-						channel.Close()
-						break
-					}
-
 					if err != nil {
-						log.Printf("stream.Recv: %v", err)
+						if err == io.EOF {
+							channel.SendRequest("exit-status", false, []byte{0, 0, 0, 0})
+						} else {
+							log.Printf("stream.Recv: %v", err)
+						}
 						channel.Close()
 						break
 					}
 
 					// 标准输出
 					if len(response.GetStdout()) > 0 {
-						_, err = channel.Write(response.GetStdout())
-						if err != nil {
+						if _, err := channel.Write(response.GetStdout()); err != nil {
 							log.Printf("channel.Write: %v", err)
 							break
 						}
@@ -178,8 +158,7 @@ func handleChannel(channel ssh.Channel, in <-chan *ssh.Request) {
 					// 标准出错
 					if len(response.GetStderr()) > 0 {
 						stream.CloseSend()
-						_, err = channel.Stderr().Write(response.GetStderr())
-						if err != nil {
+						if _, err = channel.Stderr().Write(response.GetStderr()); err != nil {
 							log.Printf("channel.Stderr.Write: %v", err)
 							break
 						}
@@ -194,8 +173,7 @@ func handleChannel(channel ssh.Channel, in <-chan *ssh.Request) {
 
 				request := &pb.SSHReceivePackRequest{
 					Repository: &pb.Repository{
-						Path:      repository,
-						Namespace: repository,
+						RelativePath: repository,
 					},
 				}
 
@@ -203,42 +181,38 @@ func handleChannel(channel ssh.Channel, in <-chan *ssh.Request) {
 					log.Fatal(err)
 				}
 
-				// receive
+				// 客户端 -> RPC
 				go func() {
-					for {
-						response, err := stream.Recv()
-						if err != nil {
-							channel.SendRequest("exit-status", false, []byte{0, 0, 0, 0})
-							channel.Close()
-							log.Printf("stream.Recv: %v", err)
-							break
-						}
-						_, err = channel.Write(response.GetStdout())
-						if err != nil {
-							log.Printf("channel.Write: %v", err)
-							break
-						}
+					sw := helper.NewRPCWriter(func(p []byte) error {
+						return stream.Send(&pb.SSHReceivePackRequest{Stdin: p})
+					})
+
+					_, err := io.Copy(sw, channel)
+					if err != nil && err != io.EOF {
+						log.Printf("stream.Send %s", err)
 					}
+					stream.CloseSend()
 				}()
 
-				// send
+				// RPC -> 客户端
 				for {
-					buf := make([]byte, 1024)
-					n, err := channel.Read(buf)
+					response, err := stream.Recv()
 					if err != nil {
-						stream.CloseSend()
-						log.Printf("channel.Read %v", err)
+						if err == io.EOF {
+							channel.SendRequest("exit-status", false, []byte{0, 0, 0, 0})
+						} else {
+							log.Printf("stream.Recv: %v", err)
+						}
+						channel.Close()
 						break
 					}
-					request := pb.SSHReceivePackRequest{
-						Stdin: buf[:n],
-					}
-					err = stream.Send(&request)
+					_, err = channel.Write(response.GetStdout())
 					if err != nil {
-						log.Printf("stream.Send  %v", err)
+						log.Printf("channel.Write: %v", err)
 						break
 					}
 				}
+
 			default:
 				log.Fatal(command)
 			}
@@ -249,14 +223,14 @@ func handleChannel(channel ssh.Channel, in <-chan *ssh.Request) {
 func handleConnection(nConn net.Conn, config *ssh.ServerConfig) {
 	conn, chans, reqs, err := ssh.NewServerConn(nConn, config)
 	if err != nil {
-		log.Fatal("failed to handshake: ", err)
+		log.Printf("failed to handshake: %v", err)
+		return
 	}
-	log.Printf("logged with key %s", conn.Permissions.Extensions["pubkey-fp"])
 
 	go ssh.DiscardRequests(reqs)
+	log.Printf("key-sha1: %s", conn.Permissions.Extensions["pubkey-fp"])
 
 	for newChannel := range chans {
-		log.Printf("channel type: %s", newChannel.ChannelType())
 		if newChannel.ChannelType() != "session" {
 			newChannel.Reject(ssh.UnknownChannelType, "unknown channel type")
 			continue
@@ -264,9 +238,9 @@ func handleConnection(nConn net.Conn, config *ssh.ServerConfig) {
 
 		channel, requires, err := newChannel.Accept()
 		if err != nil {
-			log.Fatalf("Could not accept channel: %v", err)
+			log.Printf("Could not accept channel: %v", err)
+			continue
 		}
-		log.Printf("accpet new channel")
 
 		handleChannel(channel, requires)
 	}
@@ -283,8 +257,10 @@ func main() {
 	for {
 		nConn, err := listener.Accept()
 		if err != nil {
-			log.Fatal("failed to accept incoming connection: ", err)
+			log.Printf("failed to accept incoming connection: %v", err)
+			continue
 		}
-		handleConnection(nConn, config)
+
+		go handleConnection(nConn, config)
 	}
 }

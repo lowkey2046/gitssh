@@ -7,6 +7,7 @@ import (
 
 	"github.com/grpc-ecosystem/go-grpc-middleware"
 	"github.com/grpc-ecosystem/go-grpc-middleware/logging/logrus"
+	"github.com/lowkey2046/gitssh/helper"
 	pb "github.com/lowkey2046/gitssh/proto"
 	"github.com/sirupsen/logrus"
 	"google.golang.org/grpc"
@@ -32,22 +33,22 @@ func (s *sshServer) SSHUploadPack(stream pb.SSHService_SSHUploadPackServer) erro
 		return errors.New("repository is empty")
 	}
 
-	cmd := exec.Command("git-upload-pack", repository.GetNamespace())
+	cmd := exec.Command("git-upload-pack", repository.GetRelativePath())
 	cmd.Dir = workDir
-	cmd.Stdin = NewReader(func() ([]byte, error) {
+	cmd.Stdin = helper.NewRPCReader(func() ([]byte, error) {
 		in, err := stream.Recv()
 		if err != nil {
 			return nil, err
 		}
 		return in.GetStdin(), nil
 	})
-	cmd.Stdout = NewRPCWriter(func(p []byte) error {
+	cmd.Stdout = helper.NewRPCWriter(func(p []byte) error {
 		out := &pb.SSHUploadPackResponse{
 			Stdout: p,
 		}
 		return stream.Send(out)
 	})
-	cmd.Stderr = NewRPCWriter(func(p []byte) error {
+	cmd.Stderr = helper.NewRPCWriter(func(p []byte) error {
 		out := &pb.SSHUploadPackResponse{
 			Stderr: p,
 		}
@@ -72,22 +73,22 @@ func (s *sshServer) SSHReceivePack(stream pb.SSHService_SSHReceivePackServer) er
 		return errors.New("repository is empty")
 	}
 
-	cmd := exec.Command("git-receive-pack", repository.GetNamespace())
+	cmd := exec.Command("git-receive-pack", repository.GetRelativePath())
 	cmd.Dir = workDir
-	cmd.Stdin = NewReader(func() ([]byte, error) {
+	cmd.Stdin = helper.NewRPCReader(func() ([]byte, error) {
 		in, err := stream.Recv()
 		if err != nil {
 			return nil, err
 		}
 		return in.GetStdin(), nil
 	})
-	cmd.Stdout = NewRPCWriter(func(p []byte) error {
+	cmd.Stdout = helper.NewRPCWriter(func(p []byte) error {
 		out := &pb.SSHReceivePackResponse{
 			Stdout: p,
 		}
 		return stream.Send(out)
 	})
-	cmd.Stderr = NewRPCWriter(func(p []byte) error {
+	cmd.Stderr = helper.NewRPCWriter(func(p []byte) error {
 		out := &pb.SSHReceivePackResponse{
 			Stderr: p,
 		}
