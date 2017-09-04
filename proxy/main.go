@@ -85,6 +85,123 @@ func parseGitCommand(payload []byte) (string, string, error) {
 	return command, repository, nil
 }
 
+func UploadPack(client pb.SSHServiceClient, channel ssh.Channel, repository string) {
+	stream, err := client.SSHUploadPack(context.Background())
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	msg := &pb.SSHUploadPackRequest{
+		Repository: &pb.Repository{
+			RelativePath: repository,
+		},
+	}
+	if err := stream.Send(msg); err != nil {
+		log.Fatal(err)
+	}
+
+	// 客户端 -> RPC
+	go func() {
+		sw := helper.NewRPCWriter(func(p []byte) error {
+			return stream.Send(&pb.SSHUploadPackRequest{Stdin: p})
+		})
+
+		_, err := io.Copy(sw, channel)
+		if err != nil && err != io.EOF {
+			log.Printf("io.Copy: %s", err)
+		}
+		stream.CloseSend()
+	}()
+
+	// RPC -> 客户端
+	for {
+		response, err := stream.Recv()
+		if err != nil {
+			if err == io.EOF {
+				channel.SendRequest("exit-status", false, []byte{0, 0, 0, 0})
+			} else {
+				log.Printf("stream.Recv: %v", err)
+			}
+			channel.Close()
+			break
+		}
+
+		// 标准输出
+		if len(response.GetStdout()) > 0 {
+			if _, err := channel.Write(response.GetStdout()); err != nil {
+				log.Printf("channel.Write: %v", err)
+				break
+			}
+		}
+
+		// 标准出错
+		if len(response.GetStderr()) > 0 {
+			stream.CloseSend()
+			if _, err = channel.Stderr().Write(response.GetStderr()); err != nil {
+				log.Printf("channel.Stderr.Write: %v", err)
+				break
+			}
+		}
+	}
+}
+
+func ReceivePack(client pb.SSHServiceClient, channel ssh.Channel, repository string) {
+	stream, err := client.SSHReceivePack(context.Background())
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	request := &pb.SSHReceivePackRequest{
+		Repository: &pb.Repository{
+			RelativePath: repository,
+		},
+	}
+
+	if err := stream.Send(request); err != nil {
+		log.Fatal(err)
+	}
+
+	// 客户端 -> RPC
+	go func() {
+		sw := helper.NewRPCWriter(func(p []byte) error {
+			return stream.Send(&pb.SSHReceivePackRequest{Stdin: p})
+		})
+
+		_, err := io.Copy(sw, channel)
+		if err != nil && err != io.EOF {
+			log.Printf("stream.Send %s", err)
+		}
+		stream.CloseSend()
+	}()
+
+	// RPC -> 客户端
+	for {
+		msg, err := stream.Recv()
+		if err != nil {
+			if err == io.EOF {
+				channel.SendRequest("exit-status", false, []byte{0, 0, 0, 0})
+			} else {
+				log.Printf("stream.Recv: %v", err)
+			}
+			channel.Close()
+			break
+		}
+		if len(msg.GetStdout()) > 0 {
+			if _, err = channel.Write(msg.GetStdout()); err != nil {
+				log.Printf("channel.Write: %v", err)
+				break
+			}
+		}
+
+		if len(msg.GetStderr()) > 0 {
+			if _, err = channel.Stderr().Write(msg.GetStderr()); err != nil {
+				log.Printf("channel.Write: %v", err)
+				break
+			}
+		}
+	}
+}
+
 func handleChannel(channel ssh.Channel, requires <-chan *ssh.Request) {
 	defer channel.Close()
 	for req := range requires {
@@ -107,114 +224,12 @@ func handleChannel(channel ssh.Channel, requires <-chan *ssh.Request) {
 
 			switch command {
 			case "git-upload-pack":
-				stream, err := client.SSHUploadPack(context.Background())
-				if err != nil {
-					log.Fatal(err)
-				}
-
-				msg := &pb.SSHUploadPackRequest{
-					Repository: &pb.Repository{
-						RelativePath: repository,
-					},
-				}
-				if err := stream.Send(msg); err != nil {
-					log.Fatal(err)
-				}
-
-				// 客户端 -> RPC
-				go func() {
-					sw := helper.NewRPCWriter(func(p []byte) error {
-						return stream.Send(&pb.SSHUploadPackRequest{Stdin: p})
-					})
-
-					_, err := io.Copy(sw, channel)
-					if err != nil && err != io.EOF {
-						log.Printf("io.Copy: %s", err)
-					}
-					stream.CloseSend()
-				}()
-
-				// RPC -> 客户端
-				for {
-					response, err := stream.Recv()
-					if err != nil {
-						if err == io.EOF {
-							channel.SendRequest("exit-status", false, []byte{0, 0, 0, 0})
-						} else {
-							log.Printf("stream.Recv: %v", err)
-						}
-						channel.Close()
-						break
-					}
-
-					// 标准输出
-					if len(response.GetStdout()) > 0 {
-						if _, err := channel.Write(response.GetStdout()); err != nil {
-							log.Printf("channel.Write: %v", err)
-							break
-						}
-					}
-
-					// 标准出错
-					if len(response.GetStderr()) > 0 {
-						stream.CloseSend()
-						if _, err = channel.Stderr().Write(response.GetStderr()); err != nil {
-							log.Printf("channel.Stderr.Write: %v", err)
-							break
-						}
-					}
-				}
-
+				UploadPack(client, channel, repository)
 			case "git-receive-pack":
-				stream, err := client.SSHReceivePack(context.Background())
-				if err != nil {
-					log.Fatal(err)
-				}
-
-				request := &pb.SSHReceivePackRequest{
-					Repository: &pb.Repository{
-						RelativePath: repository,
-					},
-				}
-
-				if err := stream.Send(request); err != nil {
-					log.Fatal(err)
-				}
-
-				// 客户端 -> RPC
-				go func() {
-					sw := helper.NewRPCWriter(func(p []byte) error {
-						return stream.Send(&pb.SSHReceivePackRequest{Stdin: p})
-					})
-
-					_, err := io.Copy(sw, channel)
-					if err != nil && err != io.EOF {
-						log.Printf("stream.Send %s", err)
-					}
-					stream.CloseSend()
-				}()
-
-				// RPC -> 客户端
-				for {
-					response, err := stream.Recv()
-					if err != nil {
-						if err == io.EOF {
-							channel.SendRequest("exit-status", false, []byte{0, 0, 0, 0})
-						} else {
-							log.Printf("stream.Recv: %v", err)
-						}
-						channel.Close()
-						break
-					}
-					_, err = channel.Write(response.GetStdout())
-					if err != nil {
-						log.Printf("channel.Write: %v", err)
-						break
-					}
-				}
-
+				ReceivePack(client, channel, repository)
 			default:
-				log.Fatal(command)
+				log.Printf("command %s", command)
+				continue
 			}
 		}
 	}
