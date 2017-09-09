@@ -19,6 +19,7 @@ import (
 var (
 	authorizedKeysPath = "ssh/authorized_keys"
 	hostKeyPath        = "ssh/id_rsa"
+	addr               = ":2202"
 	log                = logrus.New()
 )
 
@@ -41,6 +42,7 @@ func sshConfig() *ssh.ServerConfig {
 
 	config := &ssh.ServerConfig{
 		PublicKeyCallback: func(conn ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
+			// TODO: 从 redis 中读取 key 信息
 			if authorizedKeysMap[string(key.Marshal())] {
 				return &ssh.Permissions{
 					Extensions: map[string]string{
@@ -88,18 +90,22 @@ func parseGitCommand(payload []byte) (string, string, error) {
 func UploadPack(client pb.SSHServiceClient, channel ssh.Channel, repository string) {
 	stream, err := client.SSHUploadPack(context.Background())
 	if err != nil {
-		log.Fatal(err)
+		log.Print(err)
+		return
 	}
 
+	// TODO: 发送用户信息
 	msg := &pb.SSHUploadPackRequest{
 		Repository: &pb.Repository{
 			RelativePath: repository,
 		},
 	}
 	if err := stream.Send(msg); err != nil {
-		log.Fatal(err)
+		log.Print(err)
+		return
 	}
 
+	// TODO: wait goroutine
 	// 客户端 -> RPC
 	go func() {
 		sw := helper.NewRPCWriter(func(p []byte) error {
@@ -118,6 +124,7 @@ func UploadPack(client pb.SSHServiceClient, channel ssh.Channel, repository stri
 		response, err := stream.Recv()
 		if err != nil {
 			if err == io.EOF {
+				// TODO: exit code
 				channel.SendRequest("exit-status", false, []byte{0, 0, 0, 0})
 			} else {
 				log.Printf("stream.Recv: %v", err)
@@ -136,6 +143,7 @@ func UploadPack(client pb.SSHServiceClient, channel ssh.Channel, repository stri
 
 		// 标准出错
 		if len(response.GetStderr()) > 0 {
+			// FIXME: 发送 EOF，是 server 的阻塞 read 返回
 			stream.CloseSend()
 			if _, err = channel.Stderr().Write(response.GetStderr()); err != nil {
 				log.Printf("channel.Stderr.Write: %v", err)
@@ -148,9 +156,11 @@ func UploadPack(client pb.SSHServiceClient, channel ssh.Channel, repository stri
 func ReceivePack(client pb.SSHServiceClient, channel ssh.Channel, repository string) {
 	stream, err := client.SSHReceivePack(context.Background())
 	if err != nil {
-		log.Fatal(err)
+		log.Print(err)
+		return
 	}
 
+	// TODO: 发送用户信息
 	request := &pb.SSHReceivePackRequest{
 		Repository: &pb.Repository{
 			RelativePath: repository,
@@ -158,7 +168,8 @@ func ReceivePack(client pb.SSHServiceClient, channel ssh.Channel, repository str
 	}
 
 	if err := stream.Send(request); err != nil {
-		log.Fatal(err)
+		log.Print(err)
+		return
 	}
 
 	// 客户端 -> RPC
@@ -179,6 +190,7 @@ func ReceivePack(client pb.SSHServiceClient, channel ssh.Channel, repository str
 		msg, err := stream.Recv()
 		if err != nil {
 			if err == io.EOF {
+				// TODO: 获取 exit code
 				channel.SendRequest("exit-status", false, []byte{0, 0, 0, 0})
 			} else {
 				log.Printf("stream.Recv: %v", err)
@@ -186,8 +198,11 @@ func ReceivePack(client pb.SSHServiceClient, channel ssh.Channel, repository str
 			channel.Close()
 			break
 		}
+
 		if len(msg.GetStdout()) > 0 {
 			if _, err = channel.Write(msg.GetStdout()); err != nil {
+				// FIXME: 发送 EOF，使 server 的阻塞 read 返回
+				stream.CloseSend()
 				log.Printf("channel.Write: %v", err)
 				break
 			}
@@ -208,8 +223,10 @@ func handleChannel(channel ssh.Channel, requires <-chan *ssh.Request) {
 		req.Reply(req.Type == "exec", nil)
 
 		if req.Type == "exec" {
+			// TODO: 查询用户对该仓库的操作权限
 			command, repository, err := parseGitCommand(req.Payload)
 			if err != nil {
+				// TODO: 返回错误信息给客户端
 				log.Printf("parseGitCommand: %v", err)
 				continue
 			}
@@ -219,7 +236,8 @@ func handleChannel(channel ssh.Channel, requires <-chan *ssh.Request) {
 			// TODO: 通过 repository 查询 ip 地址
 			client, err := Get("127.0.0.1:8080")
 			if err != nil {
-				log.Fatal(err)
+				log.Print(err)
+				continue
 			}
 
 			switch command {
@@ -228,6 +246,7 @@ func handleChannel(channel ssh.Channel, requires <-chan *ssh.Request) {
 			case "git-receive-pack":
 				ReceivePack(client, channel, repository)
 			default:
+				// TODO: 返回错误信息给客户端
 				log.Printf("command %s", command)
 				continue
 			}
@@ -243,6 +262,7 @@ func handleConnection(nConn net.Conn, config *ssh.ServerConfig) {
 	}
 
 	go ssh.DiscardRequests(reqs)
+	// TODO: 将用户信息发送给 server，以便 git hook 获取用户信息
 	log.Printf("key-sha1: %s", conn.Permissions.Extensions["pubkey-fp"])
 
 	for newChannel := range chans {
@@ -264,11 +284,13 @@ func handleConnection(nConn net.Conn, config *ssh.ServerConfig) {
 func main() {
 	config := sshConfig()
 
-	listener, err := net.Listen("tcp", "0.0.0.0:2202")
+	listener, err := net.Listen("tcp", addr)
 	if err != nil {
 		log.Fatal("failed to listen for connection: ", err)
 	}
 
+	// TODO: 并发控制
+	// TODO: 流量控制
 	for {
 		nConn, err := listener.Accept()
 		if err != nil {

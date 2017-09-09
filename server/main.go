@@ -33,6 +33,8 @@ func (s *sshServer) SSHUploadPack(stream pb.SSHService_SSHUploadPackServer) erro
 		return errors.New("repository is empty")
 	}
 
+	// TODO: 接收用户信息，设置 exec 环境变量
+	// TODO: command 超时处理
 	cmd := exec.Command("git-upload-pack", repository.GetRelativePath())
 	cmd.Dir = workDir
 	cmd.Stdin = helper.NewRPCReader(func() ([]byte, error) {
@@ -59,6 +61,7 @@ func (s *sshServer) SSHUploadPack(stream pb.SSHService_SSHUploadPackServer) erro
 		return err
 	}
 
+	// TODO: 获取 exit code
 	return cmd.Wait()
 }
 
@@ -73,6 +76,8 @@ func (s *sshServer) SSHReceivePack(stream pb.SSHService_SSHReceivePackServer) er
 		return errors.New("repository is empty")
 	}
 
+	// TODO: 接收用户信息，设置 exec 环境变量
+	// TODO: command 超时处理
 	cmd := exec.Command("git-receive-pack", repository.GetRelativePath())
 	cmd.Dir = workDir
 	cmd.Stdin = helper.NewRPCReader(func() ([]byte, error) {
@@ -99,6 +104,7 @@ func (s *sshServer) SSHReceivePack(stream pb.SSHService_SSHReceivePackServer) er
 		return err
 	}
 
+	// TODO: 获取 exit code
 	return cmd.Wait()
 }
 
