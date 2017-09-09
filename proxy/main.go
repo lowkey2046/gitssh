@@ -9,8 +9,8 @@ import (
 	"net"
 	"strings"
 
-	"github.com/lowkey2046/gitssh/helper"
-	pb "github.com/lowkey2046/gitssh/proto"
+	"github.com/lowkey2046/gitssh-demo/helper"
+	pb "github.com/lowkey2046/gitssh-demo/proto"
 	"github.com/sirupsen/logrus"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/net/context"

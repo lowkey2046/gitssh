@@ -7,8 +7,8 @@ import (
 
 	"github.com/grpc-ecosystem/go-grpc-middleware"
 	"github.com/grpc-ecosystem/go-grpc-middleware/logging/logrus"
-	"github.com/lowkey2046/gitssh/helper"
-	pb "github.com/lowkey2046/gitssh/proto"
+	"github.com/lowkey2046/gitssh-demo/helper"
+	pb "github.com/lowkey2046/gitssh-demo/proto"
 	"github.com/sirupsen/logrus"
 	"google.golang.org/grpc"
 )

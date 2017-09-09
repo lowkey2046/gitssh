@@ -1,7 +1,7 @@
 package main
 
 import (
-	pb "github.com/lowkey2046/gitssh/proto"
+	pb "github.com/lowkey2046/gitssh-demo/proto"
 	"google.golang.org/grpc"
 )
 
